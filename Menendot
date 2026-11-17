@@ -1,0 +1,297 @@
+// احفظ هذا الكود باسم setup-project.mjs وشغّله بـ: node setup-project.mjs
+import fs from 'fs';
+import path from 'path';
+
+const files = {
+  "package.json": JSON.stringify({
+    "name": "smart-agenda-v2",
+    "version": "2.0.0",
+    "description": "Bilingual Arabic & Dutch Smart Agenda for Android",
+    "scripts": {
+      "cap:init": "npx cap init \"Smart Agenda V2\" \"com.houssine.smartagendav2\" --web-dir=www",
+      "cap:add-android": "npx cap add android",
+      "cap:sync": "npx cap sync android"
+    },
+    "dependencies": {
+      "@capacitor/android": "^6.1.2",
+      "@capacitor/camera": "^6.1.0",
+      "@capacitor/core": "^6.1.2",
+      "@capacitor/filesystem": "^6.1.0",
+      "@capacitor/local-notifications": "^6.1.1",
+      "@capacitor/preferences": "^6.1.0",
+      "@capacitor-community/speech-recognition": "^6.0.0"
+    }
+  }, null, 2),
+
+  "capacitor.config.json": JSON.stringify({
+    "appId": "com.houssine.smartagendav2",
+    "appName": "Smart Agenda V2",
+    "webDir": "www",
+    "bundledWebRuntime": false,
+    "plugins": {
+      "LocalNotifications": {
+        "smallIcon": "ic_stat_icon_config_sample",
+        "iconColor": "#2563EB"
+      }
+    }
+  }, null, 2),
+
+  "www/index.html": `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Agenda V2</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; background: #f4f6f9; color: #111827; }
+    .card { background: #ffffff; border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    input, select, button { padding: 10px 12px; border-radius: 8px; border: 1px solid #d1d5db; font-size: 15px; }
+    input, select { flex: 1; min-width: 140px; }
+    button { background: #2563eb; color: #fff; border: none; cursor: pointer; font-weight: 600; }
+    button.secondary { background: #0f766e; }
+    button.warn { background: #b45309; }
+    .item { border-bottom: 1px solid #e5e7eb; padding: 10px 0; }
+    .item:last-child { border-bottom: none; }
+    .doc-thumb { max-width: 100%; max-height: 180px; border-radius: 8px; margin-top: 8px; display: block; }
+    .status { font-size: 13px; color: #374151; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="row" style="margin-top:0; justify-content: space-between; align-items: center;">
+      <h2 id="appTitle" style="margin:0;">Smart Agenda V2</h2>
+      <select id="langSelect" onchange="changeLanguage()">
+        <option value="ar">العربية</option>
+        <option value="nl">Nederlands</option>
+      </select>
+    </div>
+    <div class="row">
+      <input id="titleInput" type="text" placeholder="عنوان الموعد أو الملاحظة..." />
+      <button class="secondary" onclick="startVoiceInput()" id="voiceBtn">🎤 صوت</button>
+    </div>
+    <div class="row">
+      <input id="alarmTimeInput" type="datetime-local" />
+      <button class="warn" onclick="captureDocument()" id="docBtn">📄 وثيقة</button>
+    </div>
+    <div id="docPreviewBox" class="status"></div>
+    <div class="row">
+      <button onclick="saveAgendaItem()" id="saveBtn">💾 حفظ وتنبيه</button>
+    </div>
+    <div id="statusMsg" class="status"></div>
+  </div>
+  <div class="card">
+    <h3 id="listTitle" style="margin-top:0;">المواعيد المحفوظة</h3>
+    <div id="agendaList"></div>
+  </div>
+  <script>
+    const STORAGE_KEY = 'smart_agenda_v2_items';
+    let currentDocUri = null;
+    let items = [];
+    const i18n = {
+      ar: { dir: 'rtl', title: 'Smart Agenda V2', placeholder: 'عنوان الموعد أو الملاحظة...', voice: '🎤 صوت', doc: '📄 وثيقة', save: '💾 حفظ وتنبيه', listTitle: 'المواعيد المحفوظة', savedOk: 'تم الحفظ وجدولة التنبيه.', needTitle: 'الرجاء إدخال عنوان أولاً.', noVoice: 'التعرف الصوتي غير متاح في هذا الوضع.' },
+      nl: { dir: 'ltr', title: 'Smart Agenda V2', placeholder: 'Titel van afspraak of notitie...', voice: '🎤 Spraak', doc: '📄 Document', save: '💾 Opslaan & Melding', listTitle: 'Opgeslagen items', savedOk: 'Opgeslagen en melding ingepland.', needTitle: 'Vul eerst een titel in.', noVoice: 'Spraakherkenning is hier niet beschikbaar.' }
+    };
+    function getCap() { return window.Capacitor || null; }
+    function changeLanguage() {
+      const lang = document.getElementById('langSelect').value;
+      const t = i18n[lang];
+      document.documentElement.lang = lang;
+      document.documentElement.dir = t.dir;
+      document.getElementById('appTitle').textContent = t.title;
+      document.getElementById('titleInput').placeholder = t.placeholder;
+      document.getElementById('voiceBtn').textContent = t.voice;
+      document.getElementById('docBtn').textContent = t.doc;
+      document.getElementById('saveBtn').textContent = t.save;
+      document.getElementById('listTitle').textContent = t.listTitle;
+    }
+    async function loadItems() {
+      const cap = getCap();
+      if (cap && cap.Plugins && cap.Plugins.Preferences) {
+        const res = await cap.Plugins.Preferences.get({ key: STORAGE_KEY });
+        items = res.value ? JSON.parse(res.value) : [];
+      } else {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        items = raw ? JSON.parse(raw) : [];
+      }
+      renderItems();
+    }
+    async function persistItems() {
+      const cap = getCap();
+      const serialized = JSON.stringify(items);
+      if (cap && cap.Plugins && cap.Plugins.Preferences) {
+        await cap.Plugins.Preferences.set({ key: STORAGE_KEY, value: serialized });
+      } else {
+        localStorage.setItem(STORAGE_KEY, serialized);
+      }
+    }
+    async function startVoiceInput() {
+      const lang = document.getElementById('langSelect').value;
+      const cap = getCap();
+      const sr = cap && cap.Plugins ? cap.Plugins.SpeechRecognition : null;
+      if (sr) {
+        try {
+          const perm = await sr.requestPermissions();
+          if (perm.speechRecognition !== 'granted') return;
+          const locale = lang === 'nl' ? 'nl-BE' : 'ar-MA';
+          const result = await sr.start({ language: locale, maxResults: 1, prompt: lang === 'nl' ? 'Spreek nu...' : 'تحدث الآن...', partialResults: false, popup: true });
+          if (result && result.matches && result.matches.length > 0) {
+            document.getElementById('titleInput').value = result.matches[0];
+          }
+          return;
+        } catch (e) {
+          document.getElementById('statusMsg').textContent = String(e);
+          return;
+        }
+      }
+      document.getElementById('statusMsg').textContent = i18n[lang].noVoice;
+    }
+    async function captureDocument() {
+      const cap = getCap();
+      const cam = cap && cap.Plugins ? cap.Plugins.Camera : null;
+      if (!cam) {
+        document.getElementById('statusMsg').textContent = 'الكاميرا تعمل داخل نسخة Android APK.';
+        return;
+      }
+      try {
+        const photo = await cam.getPhoto({ quality: 80, allowEditing: false, resultType: 'Uri', source: 'Camera' });
+        currentDocUri = photo.webPath || photo.path || null;
+        if (currentDocUri) {
+          document.getElementById('docPreviewBox').innerHTML = \`<img class="doc-thumb" src="\${currentDocUri}" alt="Document" />\`;
+        }
+      } catch (e) {
+        document.getElementById('statusMsg').textContent = String(e);
+      }
+    }
+    async function scheduleNotification(idNum, title, isoDateStr) {
+      if (!isoDateStr) return;
+      const cap = getCap();
+      const ln = cap && cap.Plugins ? cap.Plugins.LocalNotifications : null;
+      if (!ln) return;
+      const perm = await ln.requestPermissions();
+      if (perm.display !== 'granted') return;
+      const targetDate = new Date(isoDateStr);
+      if (isNaN(targetDate.getTime()) || targetDate <= new Date()) return;
+      await ln.schedule({
+        notifications: [{ title: 'Smart Agenda V2', body: title, id: idNum, schedule: { at: targetDate }, sound: null, attachments: null, actionTypeId: '', extra: null }]
+      });
+    }
+    async function saveAgendaItem() {
+      const lang = document.getElementById('langSelect').value;
+      const title = document.getElementById('titleInput').value.trim();
+      const alarmTime = document.getElementById('alarmTimeInput').value;
+      if (!title) {
+        document.getElementById('statusMsg').textContent = i18n[lang].needTitle;
+        return;
+      }
+      const idNum = Math.floor(Date.now() % 2147483647);
+      const newItem = { id: idNum, title, alarmTime: alarmTime || null, docUri: currentDocUri, createdAt: new Date().toISOString() };
+      items.unshift(newItem);
+      await persistItems();
+      await scheduleNotification(idNum, title, alarmTime);
+      document.getElementById('titleInput').value = '';
+      document.getElementById('alarmTimeInput').value = '';
+      currentDocUri = null;
+      document.getElementById('docPreviewBox').innerHTML = '';
+      document.getElementById('statusMsg').textContent = i18n[lang].savedOk;
+      renderItems();
+    }
+    function renderItems() {
+      const container = document.getElementById('agendaList');
+      if (!items.length) {
+        container.innerHTML = '<p style="color:#6b7280;">---</p>';
+        return;
+      }
+      container.innerHTML = items.map(item => \`
+        <div class="item">
+          <strong>\${escapeHtml(item.title)}</strong>
+          \${item.alarmTime ? \`<div class="status">⏰ \${escapeHtml(item.alarmTime)}</div>\` : ''}
+          \${item.docUri ? \`<img class="doc-thumb" src="\${item.docUri}" alt="Saved doc" />\` : ''}
+        </div>
+      \`).join('');
+    }
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    changeLanguage();
+    loadItems();
+  </script>
+</body>
+</html>`,
+
+  ".github/workflows/build-apk.yml": `name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Add Android platform & sync
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Add required Android permissions
+        run: |
+          node -e '
+          const fs = require("fs");
+          const manifestPath = "android/app/src/main/AndroidManifest.xml";
+          let xml = fs.readFileSync(manifestPath, "utf8");
+          const perms = [
+            "android.permission.RECORD_AUDIO",
+            "android.permission.CAMERA",
+            "android.permission.POST_NOTIFICATIONS",
+            "android.permission.SCHEDULE_EXACT_ALARM"
+          ];
+          const tags = perms
+            .filter(p => !xml.includes(p))
+            .map(p => \`    <uses-permission android:name="\${p}" />\`)
+            .join("\\n");
+          if (tags) {
+            xml = xml.replace("<application", \`\${tags}\\n\\n    <application\`);
+            fs.writeFileSync(manifestPath, xml, "utf8");
+          }
+          '
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-agenda-v2-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+`
+};
+
+for (const [filePath, content] of Object.entries(files)) {
+  const dir = path.dirname(filePath);
+  if (dir && dir !== '.') fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, content, 'utf8');
+  console.log('Created:', filePath);
+}
